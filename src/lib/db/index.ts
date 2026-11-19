@@ -7,6 +7,7 @@
  */
 import { Kysely, PostgresDialect, type LogEvent } from 'kysely';
 import { Pool } from 'pg';
+import { attachDatabasePool } from '@vercel/functions';
 import type { Database } from './types';
 import { env } from '../env';
 import { logger } from '../logger';
@@ -18,14 +19,19 @@ let instance: Kysely<Database> | null = null;
 
 function makePool(): Pool {
   const e = env();
+  const serverless = Boolean(process.env.VERCEL);
   const p = new Pool({
     connectionString: e.DATABASE_URL,
-    max: e.NODE_ENV === 'test' ? 4 : 10,
+    // Each serverless instance gets its own pool; keep it small so many
+    // concurrent instances stay inside the database's connection limit.
+    max: e.NODE_ENV === 'test' ? 4 : serverless ? 5 : 10,
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
     // node-postgres returns NUMERIC as string; we use integer/real columns only.
   });
   p.on('error', (err) => logger.error('pg pool error', { err: err.message }));
+  // On Vercel Fluid compute, release idle connections before the instance suspends.
+  if (serverless) attachDatabasePool(p);
   return p;
 }
 

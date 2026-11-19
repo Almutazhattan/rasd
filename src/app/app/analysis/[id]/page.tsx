@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound as nf } from 'next/navigation';
 import { requireAuth } from '@/server/http/context';
 import { getAnalysis } from '@/server/analysis';
+import { kickJobs } from '@/server/job-runner';
 import { listApprovals } from '@/server/approvals';
 import { isAppError } from '@/lib/errors';
 import {
@@ -16,6 +17,7 @@ import type {
 } from '@/lib/db/types';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 300;
 
 export default async function AnalysisPage({ params }: { params: { id: string } }) {
   const ctx = await requireAuth();
@@ -34,6 +36,8 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
   const methodology = (a.methodology ?? {}) as Row;
   const blocking = (data.compliance as Row[]).filter((c) => c.blocking);
   const inFlight = a.status === 'QUEUED' || a.status === 'RUNNING';
+  // Serverless hosts have no worker: a view of queued work nudges the queue.
+  if (a.status === 'QUEUED') await kickJobs();
 
   return (
     <div>

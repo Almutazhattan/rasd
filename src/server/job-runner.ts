@@ -1,0 +1,147 @@
+/**
+ * Job execution, shared by the long-running worker (`npm run worker`) and by
+ * serverless hosts such as Vercel, where no process lives between requests.
+ *
+ * On a serverless host the queue is drained in two ways:
+ *   - kickJobs(): after a request enqueues work, the same function invocation
+ *     keeps running in the background (waitUntil) and drains the queue within
+ *     a time budget.
+ *   - /api/cron/jobs: a scheduled sweep that requeues stale jobs, enqueues the
+ *     deadline sweep and drains whatever is left.
+ *
+ * Both paths claim jobs with FOR UPDATE SKIP LOCKED, so they cannot collide
+ * with each other or with a classic worker pointed at the same database.
+ */
+import { claimJob, completeJob, failJob, jobContext, type ClaimedJob } from './jobs';
+import { executeAnalysis } from './analysis';
+import { discover } from './providers';
+import { createDraft } from './drafts';
+import { notify } from './notifications';
+import { scoped } from '@/lib/tenancy';
+import { expiringDocuments } from './documents';
+import { logger } from '@/lib/logger';
+
+export async function handleJob(job: ClaimedJob) {
+  const ctx = jobContext(job.org_id);
+  const payload = job.payload ?? {};
+
+  switch (job.type) {
+    case 'RUN_ANALYSIS': {
+      const analysisId = String(payload.analysisId ?? '');
+      if (!analysisId) throw new Error('RUN_ANALYSIS without analysisId');
+      const status = await executeAnalysis(ctx, analysisId);
+      logger.info('analysis finished', { analysisId, status });
+      return;
+    }
+    case 'DISCOVER_TENDERS': {
+      const outcome = await discover(ctx, (payload.query as Record<string, never>) ?? {});
+      logger.info('discovery finished', {
+        orgId: job.org_id, imported: outcome.imported, updated: outcome.updated,
+      });
+      return;
+    }
+    case 'DRAFT_RESPONSE': {
+      const analysisId = String(payload.analysisId ?? '');
+      if (!analysisId) throw new Error('DRAFT_RESPONSE without analysisId');
+      await createDraft(ctx, analysisId);
+      return;
+    }
+    case 'DEADLINE_SWEEP': {
+      const s = scoped(ctx);
+      const soon = new Date(Date.now() + 5 * 86_400_000);
+      const closing = (await s
+        .from('tenders')
+        .select(['id', 'title', 'closes_at'])
+        .where('closes_at' as never, 'is not' as never, null as never)
+        .where('closes_at' as never, '<=' as never, soon as never)
+        .where('status' as never, 'in' as never, ['OPEN', 'CLOSING_SOON'] as never)
+        .execute()) as { id: string; title: string; closes_at: Date }[];
+
+      for (const t of closing) {
+        const days = Math.ceil((new Date(t.closes_at).getTime() - Date.now()) / 86_400_000);
+        await notify(ctx, {
+          kind: 'DEADLINE',
+          title: `تبقّى ${days} يوم لإغلاق «${t.title.slice(0, 60)}»`,
+          link: `/app/opportunities/${t.id}`,
+        });
+        if (days <= 0) {
+          await s.update('tenders').set({ status: 'CLOSED' }).where('id' as never, '=', t.id as never).execute();
+        } else if (days <= 5) {
+          await s.update('tenders').set({ status: 'CLOSING_SOON' }).where('id' as never, '=', t.id as never).execute();
+        }
+      }
+
+      for (const doc of (await expiringDocuments(ctx, 30)) as { title: string }[]) {
+        await notify(ctx, {
+          kind: 'MISSING_DOCUMENT',
+          title: `وثيقة تقترب من الانتهاء: ${doc.title.slice(0, 70)}`,
+          body: 'الوثيقة المنتهية قد تسبب الاستبعاد من المنافسة.',
+          link: '/app/company/documents',
+        });
+      }
+      return;
+    }
+    case 'PROCESS_DOCUMENT':
+    case 'SEND_NOTIFICATIONS':
+      // Both are performed inline by their services today; the job types exist
+      // so the work can move here without a schema change.
+      logger.info('job type handled inline', { type: job.type });
+      return;
+  }
+}
+
+/** Claim, run and settle a single job. Returns false when the queue is empty. */
+export async function runOneJob(workerId: string): Promise<boolean> {
+  const job = await claimJob(workerId);
+  if (!job) return false;
+  logger.info('job claimed', { jobId: job.id, type: job.type, attempt: job.attempts });
+  try {
+    await handleJob(job);
+    await completeJob(job.id);
+  } catch (err) {
+    await failJob(job, err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err));
+  }
+  return true;
+}
+
+/**
+ * Drain due jobs until the queue is empty or the time budget is spent. A job
+ * is only started while budget remains; a started job is allowed to finish
+ * (the host's maxDuration is the hard ceiling, and requeueStale recovers a job
+ * whose invocation was cut off).
+ */
+export async function drainJobs(opts: { budgetMs: number; workerId?: string }): Promise<number> {
+  const workerId = opts.workerId ?? `fn-${Math.random().toString(36).slice(2, 10)}`;
+  const deadline = Date.now() + opts.budgetMs;
+  let ran = 0;
+  while (Date.now() < deadline) {
+    const had = await runOneJob(workerId);
+    if (!had) break;
+    ran++;
+  }
+  return ran;
+}
+
+/** True when running on a serverless host with no separate worker process. */
+export function isServerless(): boolean {
+  return Boolean(process.env.VERCEL) || process.env.INLINE_JOBS === 'true';
+}
+
+/**
+ * After a request enqueues work, keep the invocation alive in the background
+ * to process it. No-op outside serverless hosts — there the worker does it.
+ * Never throws into the request: a failure here leaves the job queued for the
+ * next kick or cron sweep.
+ */
+export async function kickJobs(budgetMs = 240_000): Promise<void> {
+  if (!isServerless()) return;
+  const work = drainJobs({ budgetMs }).catch((err) => {
+    logger.error('inline job drain failed', { err: err instanceof Error ? err.message : String(err) });
+  });
+  try {
+    const { waitUntil } = await import('@vercel/functions');
+    waitUntil(work);
+  } catch {
+    // Not on Vercel's runtime: the promise still runs while the process lives.
+  }
+}

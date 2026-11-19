@@ -19,7 +19,8 @@ const schema = z.object({
   ETIMAD_API_KEY: z.string().optional(),
   ENABLE_DEMO_PROVIDER: z.enum(['true', 'false']).default('true'),
 
-  STORAGE_DRIVER: z.enum(['local', 's3']).default('local'),
+  STORAGE_DRIVER: z.enum(['local', 's3', 'blob']).default('local'),
+  BLOB_READ_WRITE_TOKEN: z.string().optional(),
   STORAGE_LOCAL_DIR: z.string().default('./storage'),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(26_214_400),
   S3_BUCKET: z.string().optional(),
@@ -36,6 +37,9 @@ const schema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().int().positive().default(60),
+
+  /** Bearer secret for /api/cron/jobs (Vercel Cron sends it automatically). */
+  CRON_SECRET: z.string().optional(),
 });
 
 export type Env = z.infer<typeof schema>;

@@ -90,6 +90,42 @@ User=rasd
 
 ---
 
+## Vercel
+
+The app runs on Vercel without a worker process. `vercel.json` sets the build
+command to `npm run db:migrate && npm run build`, so migrations apply on every
+deploy, and schedules a daily cron (03:00 UTC = 06:00 Riyadh) on
+`/api/cron/jobs`.
+
+How queued work runs with no worker (`src/server/job-runner.ts`):
+
+- **After a request enqueues work** (start analysis, background draft,
+  background discovery) the same invocation keeps draining the queue in the
+  background via `waitUntil`, up to the route's `maxDuration` (300 s).
+- **Viewing a still-queued analysis** nudges the queue the same way, so a job
+  waiting on retry back-off resumes when someone is looking at it.
+- **The daily cron** requeues jobs cut off mid-run, prunes expired sessions,
+  enqueues `DEADLINE_SWEEP` for every organization, then drains the queue.
+
+All three claim jobs with `FOR UPDATE SKIP LOCKED`, the same as the worker.
+
+Required setup in the Vercel project:
+
+1. **Storage → Neon (Postgres)** — connect it to the project; it sets
+   `DATABASE_URL`.
+2. **Storage → Blob** — create a **private** store and connect it; it sets
+   `BLOB_READ_WRITE_TOKEN`. Then set `STORAGE_DRIVER=blob`.
+3. Environment variables: `SESSION_SECRET` (32+ chars), `CRON_SECRET`
+   (16+ chars), `ANTHROPIC_API_KEY`, `APP_URL` (the production URL),
+   `ENABLE_DEMO_PROVIDER`.
+
+Limits to know: a single analysis must finish inside one function invocation
+(300 s on Hobby with Fluid compute); a longer one is cut off, requeued by the
+next cron and retried. The Hobby plan runs crons once a day. Rate limiting is
+per instance (see LIMITATIONS.md).
+
+---
+
 ## Reverse proxy
 
 Terminate TLS upstream and forward the client address, or rate limiting and the

@@ -3,6 +3,7 @@ import { body, handler, ok } from '@/server/http/handler';
 import { requireAuth } from '@/server/http/context';
 import { discover, providerStates } from '@/server/providers';
 import { enqueue } from '@/server/jobs';
+import { kickJobs } from '@/server/job-runner';
 import { assertCan } from '@/lib/rbac';
 
 const input = z.object({
@@ -24,10 +25,13 @@ export const POST = handler(async (req: Request) => {
   assertCan(ctx.role, 'tender:import');
   const { background, ...query } = await body(req, input);
   if (background) {
-    return ok({ jobId: await enqueue(ctx, 'DISCOVER_TENDERS', { query }), queued: true });
+    const jobId = await enqueue(ctx, 'DISCOVER_TENDERS', { query });
+    await kickJobs();
+    return ok({ jobId, queued: true });
   }
   return ok((await discover(ctx, query)) as never);
 });
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
+export const maxDuration = 300;

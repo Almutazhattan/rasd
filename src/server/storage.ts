@@ -6,6 +6,10 @@
  * through an authenticated route handler that re-checks tenancy — so a leaked
  * key is not a leaked file.
  *
+ * The blob driver (STORAGE_DRIVER=blob) stores files in a *private* Vercel Blob
+ * store: blobs are not reachable by URL without the store's token, so reads
+ * still go only through the authenticated route handlers.
+ *
  * The S3 driver is a documented seam, not a claim: with STORAGE_DRIVER=s3 the
  * methods throw a clear "not implemented in this build" error rather than
  * silently writing somewhere unexpected. See docs/INTEGRATIONS.md.
@@ -100,6 +104,15 @@ export async function putFile(
   if (env().STORAGE_DRIVER === 's3') {
     throw new AppError('INTERNAL', 'The S3 storage driver is not implemented in this build. Use STORAGE_DRIVER=local.');
   }
+  if (env().STORAGE_DRIVER === 'blob') {
+    const { put } = await import('@vercel/blob');
+    await put(storageKey, Buffer.from(bytes), {
+      access: 'private',
+      addRandomSuffix: false,
+      contentType: mimeType,
+    });
+    return { storageKey, sha256, byteSize: bytes.byteLength, mimeType };
+  }
   const path = safePath(storageKey);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, bytes, { mode: 0o600 });
@@ -110,6 +123,14 @@ export async function getFile(storageKey: string): Promise<Buffer> {
   if (env().STORAGE_DRIVER === 's3') {
     throw new AppError('INTERNAL', 'The S3 storage driver is not implemented in this build.');
   }
+  if (env().STORAGE_DRIVER === 'blob') {
+    const { get } = await import('@vercel/blob');
+    const result = await get(storageKey, { access: 'private' }).catch(() => null);
+    if (!result || result.statusCode !== 200 || !result.stream) {
+      throw new AppError('NOT_FOUND', 'The stored file is missing.');
+    }
+    return Buffer.from(await new Response(result.stream).arrayBuffer());
+  }
   try {
     return await readFile(safePath(storageKey));
   } catch {
@@ -119,6 +140,15 @@ export async function getFile(storageKey: string): Promise<Buffer> {
 
 export async function deleteFile(storageKey: string): Promise<void> {
   if (env().STORAGE_DRIVER === 's3') return;
+  if (env().STORAGE_DRIVER === 'blob') {
+    try {
+      const { del } = await import('@vercel/blob');
+      await del(storageKey);
+    } catch {
+      // Already gone or unreachable: not an error worth surfacing.
+    }
+    return;
+  }
   try {
     await unlink(safePath(storageKey));
   } catch {
