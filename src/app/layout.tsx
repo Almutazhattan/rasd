@@ -26,6 +26,15 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           type="font/woff2"
           crossOrigin="anonymous"
         />
+        {/* Scroll reveal: hide .reveal from the first paint (no flash of text that
+            then fades back in). If the reveal script never mounts, show it all. */}
+        <script
+          dangerouslySetInnerHTML={{
+            __html:
+              "document.documentElement.classList.add('reveal-ready');" +
+              "setTimeout(function(){if(!window.__revealMounted){document.querySelectorAll('.reveal').forEach(function(e){e.classList.add('active')})}},2500);",
+          }}
+        />
       </head>
       <body>{children}</body>
     </html>

@@ -149,6 +149,15 @@
   .tbl tbody tr:hover { background: rgba(243, 239, 230, 0.02); }
 }
 
+/* ── scroll reveal (components/client/reveal.tsx), as on the original landing ──
+   Hidden only once the observer is running (html.reveal-ready), so content is
+   never stuck invisible; the transition lives on .active so hiding is instant. */
+html.reveal-ready .reveal:not(.active) { opacity: 0; transform: translateY(34px); }
+.reveal.active {
+  opacity: 1; transform: none;
+  transition: opacity .9s cubic-bezier(.22, 1, .36, 1), transform .9s cubic-bezier(.22, 1, .36, 1);
+}
+
 /* ── "How it works" perspective card stack (components/client/stage-stack.tsx) ── */
 .stackwrap { perspective: 1200px; transform-style: preserve-3d; }
 .stackwrap .stack { transform-style: preserve-3d; }
@@ -180,5 +189,6 @@
 
 @media (prefers-reduced-motion: reduce) {
   .blade { animation: none !important; }
+  html.reveal-ready .reveal { opacity: 1 !important; transform: none !important; transition: none !important; }
   * { scroll-behavior: auto !important; }
 }
