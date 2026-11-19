@@ -116,8 +116,9 @@ Required setup in the Vercel project:
 2. **Storage → Blob** — create a **private** store and connect it; it sets
    `BLOB_READ_WRITE_TOKEN`. Then set `STORAGE_DRIVER=blob`.
 3. Environment variables: `SESSION_SECRET` (32+ chars), `CRON_SECRET`
-   (16+ chars), `ANTHROPIC_API_KEY`, `APP_URL` (the production URL),
-   `ENABLE_DEMO_PROVIDER`.
+   (16+ chars), `APP_URL` (the production URL), `ENABLE_DEMO_PROVIDER`, and
+   the AI provider: `AI_PROVIDER` (`anthropic`, `gemini` or `groq`) plus that
+   provider's key (`ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `GROQ_API_KEY`).
 
 Limits to know: a single analysis must finish inside one function invocation
 (300 s on Hobby with Fluid compute); a longer one is cut off, requeued by the

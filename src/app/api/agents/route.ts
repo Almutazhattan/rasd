@@ -1,7 +1,7 @@
 import { handler, ok } from '@/server/http/handler';
 import { requireAuth } from '@/server/http/context';
 import { AGENT_LIST } from '@/agents/registry';
-import { aiState, env } from '@/lib/env';
+import { aiState, env, aiModel } from '@/lib/env';
 import { scoped } from '@/lib/tenancy';
 
 export const GET = handler(async () => {
@@ -15,7 +15,7 @@ export const GET = handler(async () => {
     .execute();
 
   return ok({
-    provider: { state: aiState(), model: env().ANTHROPIC_MODEL },
+    provider: { state: aiState(), provider: env().AI_PROVIDER, model: aiModel() },
     agents: AGENT_LIST.map((a) => ({
       key: a.key, title: a.title, role: a.role, tools: a.tools,
       maxIterations: a.maxIterations, maxAttempts: a.maxAttempts, timeoutMs: a.timeoutMs,

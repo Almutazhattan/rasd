@@ -9,9 +9,14 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
   SESSION_SECRET: z.string().min(32, 'SESSION_SECRET must be at least 32 characters'),
 
-  AI_PROVIDER: z.enum(['anthropic', 'none']).default('anthropic'),
+  /** Which model provider runs the agents: anthropic | gemini | groq | none. */
+  AI_PROVIDER: z.enum(['anthropic', 'gemini', 'groq', 'none']).default('anthropic'),
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-5'),
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
+  GROQ_API_KEY: z.string().optional(),
+  GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8000),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
@@ -68,9 +73,26 @@ export function __resetEnv() {
  */
 export type IntegrationState = 'CONNECTED' | 'NOT_CONFIGURED' | 'DEMO' | 'DISABLED';
 
+/** The API key the selected provider needs, by variable name. */
+export function aiKeyName(e: Env = env()): string {
+  return e.AI_PROVIDER === 'gemini' ? 'GEMINI_API_KEY'
+    : e.AI_PROVIDER === 'groq' ? 'GROQ_API_KEY'
+    : 'ANTHROPIC_API_KEY';
+}
+
+/** The model the selected provider will use. */
+export function aiModel(e: Env = env()): string {
+  return e.AI_PROVIDER === 'gemini' ? e.GEMINI_MODEL
+    : e.AI_PROVIDER === 'groq' ? e.GROQ_MODEL
+    : e.ANTHROPIC_MODEL;
+}
+
 export function aiState(e: Env = env()): IntegrationState {
   if (e.AI_PROVIDER === 'none') return 'DISABLED';
-  return e.ANTHROPIC_API_KEY && e.ANTHROPIC_API_KEY.length > 10 ? 'CONNECTED' : 'NOT_CONFIGURED';
+  const key = e.AI_PROVIDER === 'gemini' ? e.GEMINI_API_KEY
+    : e.AI_PROVIDER === 'groq' ? e.GROQ_API_KEY
+    : e.ANTHROPIC_API_KEY;
+  return key && key.length > 10 ? 'CONNECTED' : 'NOT_CONFIGURED';
 }
 
 export function etimadState(e: Env = env()): IntegrationState {

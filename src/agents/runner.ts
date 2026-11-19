@@ -23,6 +23,7 @@ import { zodToJsonSchema } from './jsonschema';
 import { getProvider, type LlmContent, type LlmMessage, type LlmToolSpec } from './provider';
 import { TOOLS, toolSpecs, type ToolContext } from './tools';
 import type { AgentDefinition } from './registry';
+import { aiKeyName } from '@/lib/env';
 
 export interface RunOptions {
   ctx: Ctx;
@@ -82,7 +83,7 @@ export async function runAgent<T = unknown>(opts: RunOptions): Promise<RunOutcom
       .set({
         status: 'PROVIDER_UNCONFIGURED',
         error:
-          'No AI provider is configured for this deployment. Set ANTHROPIC_API_KEY to enable ' +
+          `No AI provider is configured for this deployment. Set ${aiKeyName()} to enable ` +
           'agent execution. No analysis was performed.',
         finished_at: new Date(),
       })

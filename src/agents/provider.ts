@@ -1,5 +1,6 @@
 /**
- * LLM provider adapter.
+ * LLM provider adapter. Anthropic is implemented here; Gemini and Groq use the
+ * OpenAI-compatible adapter in openai-compatible.ts. AI_PROVIDER selects.
  *
  * Agent code never imports a vendor SDK: it talks to this interface. Swapping
  * providers is a new file here, not a change to any agent.
@@ -9,7 +10,8 @@
  * status PROVIDER_UNCONFIGURED. Nothing is ever invented to fill the gap.
  */
 import Anthropic from '@anthropic-ai/sdk';
-import { aiState, env, type IntegrationState } from '@/lib/env';
+import { aiKeyName, aiState, env, type IntegrationState } from '@/lib/env';
+import { OpenAiCompatibleProvider } from './openai-compatible';
 import { AppError, providerUnconfigured } from '@/lib/errors';
 import { logger } from '@/lib/logger';
 import type { JsonSchema } from './jsonschema';
@@ -72,7 +74,7 @@ class UnconfiguredProvider implements LlmProvider {
 
   async complete(): Promise<LlmResult> {
     throw providerUnconfigured(
-      'No AI provider is configured. Set ANTHROPIC_API_KEY to enable agent execution.',
+      `No AI provider is configured. Set ${aiKeyName()} to enable agent execution.`,
     );
   }
 }
@@ -144,9 +146,31 @@ export function getProvider(): LlmProvider {
   if (cached) return cached;
   const e = env();
   const state = aiState(e);
-  cached = state === 'CONNECTED' && e.ANTHROPIC_API_KEY
-    ? new AnthropicProvider(e.ANTHROPIC_API_KEY, e.ANTHROPIC_MODEL, e.AI_REQUEST_TIMEOUT_MS)
-    : new UnconfiguredProvider(state);
+  if (state !== 'CONNECTED') {
+    cached = new UnconfiguredProvider(state);
+  } else if (e.AI_PROVIDER === 'gemini' && e.GEMINI_API_KEY) {
+    cached = new OpenAiCompatibleProvider({
+      name: 'gemini',
+      baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+      apiKey: e.GEMINI_API_KEY,
+      model: e.GEMINI_MODEL,
+      timeoutMs: e.AI_REQUEST_TIMEOUT_MS,
+      schemaDialect: 'gemini',
+    });
+  } else if (e.AI_PROVIDER === 'groq' && e.GROQ_API_KEY) {
+    cached = new OpenAiCompatibleProvider({
+      name: 'groq',
+      baseUrl: 'https://api.groq.com/openai/v1',
+      apiKey: e.GROQ_API_KEY,
+      model: e.GROQ_MODEL,
+      timeoutMs: e.AI_REQUEST_TIMEOUT_MS,
+      schemaDialect: 'json-schema',
+    });
+  } else if (e.ANTHROPIC_API_KEY) {
+    cached = new AnthropicProvider(e.ANTHROPIC_API_KEY, e.ANTHROPIC_MODEL, e.AI_REQUEST_TIMEOUT_MS);
+  } else {
+    cached = new UnconfiguredProvider(state);
+  }
   return cached;
 }
 

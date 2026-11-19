@@ -5,7 +5,8 @@ live service" are different claims, and they are kept apart here.
 
 | Integration | Required for | Status |
 |---|---|---|
-| Anthropic API | running any agent | implemented; **not executed against the live API from this repository** |
+| Anthropic API | running any agent (one provider needed) | implemented; **not executed against the live API from this repository** |
+| Google Gemini / Groq | running any agent (alternatives) | OpenAI-compatible adapter implemented and unit-tested; **not executed against the live APIs from this repository** |
 | Etimad (اعتماد) | official tender discovery | adapter implemented and documented; **never executed against the live service** |
 | Demonstration provider | local development | implemented and tested |
 | SMTP | verification, reset and invitation email | **not implemented** — intent is logged |
@@ -41,6 +42,30 @@ behaviour, not a degradation.
 
 **Swapping provider.** Implement `LlmProvider` in a new file, return it from
 `getProvider()`. No agent changes.
+
+
+## Google Gemini and Groq (alternative AI providers)
+
+```bash
+AI_PROVIDER="gemini"                 # or "groq"
+GEMINI_API_KEY="…"                   # https://aistudio.google.com/apikey
+GEMINI_MODEL="gemini-2.5-flash"
+GROQ_API_KEY="…"                     # https://console.groq.com/keys
+GROQ_MODEL="llama-3.3-70b-versatile"
+```
+
+`src/agents/openai-compatible.ts` speaks the OpenAI Chat Completions format
+with function calling, which both services expose. It translates the
+provider-neutral messages both ways, and for Gemini rewrites each tool schema
+into the OpenAPI subset Gemini accepts (no `additionalProperties`, nullable
+instead of `["T","null"]`). The agent's output is still validated against its
+full zod contract, so the looser wire schema does not loosen validation.
+
+**Status.** Covered by `tests/openai-compatible.test.ts` with `fetch` replaced:
+the wire format sent, tool-call parsing, error mapping, and that every real
+agent schema converts cleanly. Not yet run against the live services. Free
+tiers have per-minute token limits that long tender documents can hit; a
+rate-limited call fails the step, and the runner retries it.
 
 ---
 

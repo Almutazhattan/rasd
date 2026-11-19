@@ -19,6 +19,7 @@ import type { DraftingOut } from '@/agents/contracts';
 import { assertApproved, requestApproval } from './approvals';
 import { VERDICT_LABELS } from '@/lib/scoring';
 import type { Verdict } from '@/lib/db/types';
+import { aiKeyName } from '@/lib/env';
 
 export async function createDraft(ctx: Ctx, analysisId: string) {
   if (!('system' in ctx)) assertCan(ctx.role, 'draft:write');
@@ -48,7 +49,7 @@ export async function createDraft(ctx: Ctx, analysisId: string) {
       draft_id: draftId, ordinal: 0, heading: 'المسودة لم تُنشأ',
       body:
         'لا يوجد مزوّد ذكاء اصطناعي مُهيّأ في هذا النشر، فلم يُنفَّذ وكيل إعداد العرض ولم ' +
-        'يُصَغ أي نص. اضبط ANTHROPIC_API_KEY ثم أعد إنشاء المسودة.',
+        `يُصَغ أي نص. اضبط ${aiKeyName()} ثم أعد إنشاء المسودة.`,
       open_points: ['تهيئة مزوّد الذكاء الاصطناعي'],
     }).execute();
     await audit(ctx, 'draft.create', { type: 'response_draft', id: draftId }, { providerUnconfigured: true });

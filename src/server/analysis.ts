@@ -38,6 +38,7 @@ import type {
 } from '@/agents/contracts';
 import type { AnalysisStatus, Verdict } from '@/lib/db/types';
 import { requestApproval } from './approvals';
+import { aiKeyName } from '@/lib/env';
 
 export interface StartAnalysisResult {
   analysisId: string;
@@ -475,7 +476,7 @@ async function finishUnconfigured(ctx: Ctx, analysisId: string): Promise<Analysi
       status: 'PROVIDER_UNCONFIGURED',
       failure_reason:
         'No AI provider is configured for this deployment, so no agent was executed and ' +
-        'nothing was analysed. Set ANTHROPIC_API_KEY and run the analysis again.',
+        `nothing was analysed. Set ${aiKeyName()} and run the analysis again.`,
       finished_at: new Date(), updated_at: new Date(),
     })
     .where('id' as never, '=', analysisId as never)

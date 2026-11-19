@@ -1,6 +1,6 @@
 import { requireAuth } from '@/server/http/context';
 import { providerStates } from '@/server/providers';
-import { aiState, demoState, env, etimadState, mailState } from '@/lib/env';
+import { aiKeyName, aiModel, aiState, demoState, env, etimadState, mailState } from '@/lib/env';
 import { Alert, Breadcrumb, Card, IntegrationBadge, PageHeader } from '@/components/ui';
 
 export const metadata = { title: 'التكاملات — رَصْد' };
@@ -11,11 +11,11 @@ export default async function IntegrationsPage() {
   const e = env();
   const rows = [
     {
-      key: 'anthropic',
-      label: 'مزوّد الذكاء الاصطناعي (Anthropic)',
+      key: 'ai',
+      label: `مزوّد الذكاء الاصطناعي (${({ anthropic: 'Anthropic', gemini: 'Google Gemini', groq: 'Groq', none: 'معطّل' } as const)[e.AI_PROVIDER]})`,
       state: aiState(),
-      detail: `النموذج المضبوط: ${e.ANTHROPIC_MODEL}`,
-      vars: ['ANTHROPIC_API_KEY', 'ANTHROPIC_MODEL'],
+      detail: `النموذج المضبوط: ${aiModel()}`,
+      vars: ['AI_PROVIDER', aiKeyName(), aiKeyName().replace('_API_KEY', '_MODEL')],
       note:
         'بلا مفتاح، تُسجَّل كل محاولة تشغيل بحالة «المزوّد غير مُهيّأ» ولا تُنتج نتائج. ' +
         'لا يُحاكي النظام تنفيذ وكيل لم يُنفَّذ.',

@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { requireAuth } from '@/server/http/context';
 import { scoped } from '@/lib/tenancy';
 import { AGENT_LIST } from '@/agents/registry';
-import { aiState, env } from '@/lib/env';
+import { aiKeyName, aiModel, aiState, env } from '@/lib/env';
 import {
   Alert, Card, DateText, IntegrationBadge, PageHeader, Row, RunStatusBadge,
 } from '@/components/ui';
@@ -29,13 +29,13 @@ export default async function AgentsPage() {
         kicker="المحرك"
         title="الوكلاء وتشغيلاتهم"
         lead="ثمانية وكلاء بمسؤوليات منفصلة وأدوات محدودة ومخرجات مُتحقَّق من مخططها."
-        actions={<IntegrationBadge state={state} label={`المزوّد · ${env().ANTHROPIC_MODEL}`} />}
+        actions={<IntegrationBadge state={state} label={`المزوّد · ${env().AI_PROVIDER} · ${aiModel()}`} />}
       />
 
       {state !== 'CONNECTED' && (
         <div className="mb-10">
           <Alert tone="warn" title="المزوّد غير مُهيّأ">
-            التشغيل الفعلي يحتاج ANTHROPIC_API_KEY. بدونه تُسجَّل كل محاولة تشغيل بحالة «المزوّد غير
+            التشغيل الفعلي يحتاج {aiKeyName()}. بدونه تُسجَّل كل محاولة تشغيل بحالة «المزوّد غير
             مُهيّأ» ولا تُنتج نتائج — لا محاكاة ولا بيانات مُصطنعة.
           </Alert>
         </div>
