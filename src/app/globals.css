@@ -149,6 +149,35 @@
   .tbl tbody tr:hover { background: rgba(243, 239, 230, 0.02); }
 }
 
+/* ── "How it works" perspective card stack (components/client/stage-stack.tsx) ── */
+.stackwrap { perspective: 1200px; transform-style: preserve-3d; }
+.stackwrap .stack { transform-style: preserve-3d; }
+.swapcard {
+  /* physical left, not inset-inline-start: GSAP's xPercent:-50 centres on it in both LTR and RTL */
+  position: absolute; top: 50%; left: 50%; overflow: hidden;
+  transform-style: preserve-3d; backface-visibility: hidden; will-change: transform;
+  box-shadow: 0 40px 90px -40px rgba(10, 10, 9, 0.9), 0 0 0 1px rgba(163, 157, 144, 0.12) inset;
+}
+/* the stack needs denser glass than the page's clear film, or back cards bleed through */
+.swapcard.glass {
+  background: rgba(30, 30, 28, 0.82);
+  backdrop-filter: blur(14px) saturate(120%); -webkit-backdrop-filter: blur(14px) saturate(120%);
+  border: 1px solid rgba(163, 157, 144, 0.12);
+}
+.stagerow { border-inline-start: 2px solid transparent; transition: border-color .45s, color .45s, background-color .45s; }
+.stagerow:hover { background: rgba(255, 255, 255, 0.025); }
+.stagerow.on { border-inline-start-color: var(--blue); background: rgba(47, 107, 255, 0.05); }
+.stagerow.on .st-n { color: var(--blue); }
+.stagerow.on .st-t { color: var(--ink); }
+.stackdot {
+  width: 26px; height: 3px; border-radius: 9999px; background: rgba(163, 157, 144, 0.22);
+  cursor: pointer; overflow: hidden; padding: 0; border: 0;
+  transition: width .5s cubic-bezier(.22, 1, .36, 1), background-color .4s;
+}
+.stackdot.on { width: 54px; background: rgba(216, 203, 179, 0.22); }
+.stackdot i { display: block; height: 100%; width: 100%; border-radius: inherit; background: var(--blue); transform: scaleX(0); }
+.stackwrap.held ~ div .stackdot.on { opacity: .55; }
+
 @media (prefers-reduced-motion: reduce) {
   .blade { animation: none !important; }
   * { scroll-behavior: auto !important; }

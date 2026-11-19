@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Card, ProvenanceLegend } from '@/components/ui';
 import { AGENT_LIST } from '@/agents/registry';
+import { StageStack } from '@/components/client/stage-stack';
 
 const STAGES = [
   {
@@ -89,7 +90,7 @@ export default function Home() {
         </div>
       </section>
 
-      <section className="py-24 sm:py-32">
+      <section className="overflow-x-clip py-24 sm:py-32">
         <div className="mx-auto max-w-7xl px-6">
           <div className="mx-auto max-w-3xl text-center">
             <p className="lbl text-[11px] tracking-[.22em] text-blue/90">كيف تعمل</p>
@@ -100,16 +101,11 @@ export default function Home() {
             </h2>
           </div>
 
-          <div className="mt-20 grid gap-6 md:grid-cols-2">
-            {STAGES.map((s, i) => (
-              <Card key={s.n} className={i === 3 ? 'border-blue/40 bg-blue/[.07]' : ''}>
-                <div className="flex items-start justify-between">
-                  <span className="chip border border-white/12 tnum text-xs">{s.n}</span>
-                </div>
-                <h3 className="mt-5 text-2xl">{s.title}</h3>
-                <p className="mt-3 text-muted">{s.body}</p>
-              </Card>
-            ))}
+          <div className="mt-20">
+            <StageStack
+              stages={STAGES}
+              hint="المراحل تتبادل تلقائياً — مرّر فوق البطاقات لإيقافها، أو اختر مرحلة من القائمة."
+            />
           </div>
         </div>
       </section>
