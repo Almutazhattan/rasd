@@ -10,7 +10,7 @@ import {
   EmptyState, Meter, PageHeader, Pill, Provenance, ProvenanceLegend, Row, ScoreRing,
   SeverityBadge, SourceBadge, VerdictBadge,
 } from '@/components/ui';
-import { ApprovalDecision, CreateDraftButton, Refresher } from '@/components/client/forms';
+import { ApprovalDecision, CreateDraftButton, Refresher, RunAnalysisButton } from '@/components/client/forms';
 import { DIMENSION_LABELS } from '@/lib/scoring';
 import type {
   AnalysisStatus, ApprovalStatus, ComplianceStatus, Provenance as Prov, Severity, Verdict,
@@ -77,14 +77,20 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
           <Alert tone="warn" title="لم يُنفَّذ أي وكيل">
             {String(a.failure_reason ?? 'لا مزوّد ذكاء اصطناعي مُهيّأ في هذا النشر.')}
           </Alert>
+          <div className="mt-5"><RunAnalysisButton tenderId={String(t.id)} label="أعد التحليل" /></div>
         </div>
       )}
 
       {a.status === 'FAILED' && (
         <div className="mb-10">
           <Alert tone="danger" title="تعذّر إكمال التحليل">
-            {String(a.failure_reason ?? 'سبب غير معروف.')}
+            <p>
+              لم تُحفظ أي نتيجة لهذه المحاولة. غالباً يكون السبب ضغطاً مؤقتاً على مزوّد الذكاء الاصطناعي —
+              أعد التحليل، وستبدأ محاولة جديدة كاملة.
+            </p>
+            <p className="mt-3 text-xs text-muted/70" dir="ltr">{String(a.failure_reason ?? 'unknown')}</p>
           </Alert>
+          <div className="mt-5"><RunAnalysisButton tenderId={String(t.id)} label="أعد التحليل" /></div>
         </div>
       )}
 
