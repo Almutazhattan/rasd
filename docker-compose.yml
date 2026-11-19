@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rasd
+      POSTGRES_PASSWORD: rasd
+      POSTGRES_DB: rasd
+    ports: ["5432:5432"]
+    volumes: ["rasd-db:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rasd -d rasd"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://rasd:rasd@db:5432/rasd?schema=public
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in your .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+      ENABLE_DEMO_PROVIDER: ${ENABLE_DEMO_PROVIDER:-true}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: /app/storage
+    ports: ["3000:3000"]
+    volumes: ["rasd-files:/app/storage"]
+    command: sh -c "npx prisma migrate deploy && npm run start"
+
+  worker:
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://rasd:rasd@db:5432/rasd?schema=public
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in your .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-5}
+      STORAGE_DRIVER: local
+      STORAGE_LOCAL_DIR: /app/storage
+    volumes: ["rasd-files:/app/storage"]
+    command: sh -c "npx tsx src/server/worker.ts"
+
+volumes:
+  rasd-db:
+  rasd-files:
