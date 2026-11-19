@@ -5,6 +5,9 @@ import { ConfirmProfileButton, ProfileForm, UploadDocument } from '@/components/
 import { currentSession, requireAuth } from '@/server/http/context';
 import { getProfile, readiness } from '@/server/company';
 import { listCompanyDocuments } from '@/server/documents';
+import { DemoWorkspaceCard } from '@/components/client/demo-workspace';
+import { aiState } from '@/lib/env';
+import { can } from '@/lib/rbac';
 
 export const metadata = { title: 'تهيئة مساحة العمل — رَصْد' };
 export const dynamic = 'force-dynamic';
@@ -37,6 +40,13 @@ export default async function Onboarding() {
         lead="ما تُدخله هنا يُستخدم كمرجع معتمد: كلما كان أدقّ، كان التقييم أقرب للواقع وأقل اعتماداً على الاستنتاج."
         actions={<Link href="/app/dashboard" className="btn-ghost text-sm">تخطَّ إلى اللوحة</Link>}
       />
+
+      {!data && can(ctx.role, 'profile:confirm') && (
+        <div className="mb-10">
+          <DemoWorkspaceCard aiConnected={aiState() === 'CONNECTED'} />
+          <p className="mt-5 text-center text-xs text-muted/60">أو أدخل بيانات منشأتك الحقيقية أدناه.</p>
+        </div>
+      )}
 
       <div className="mb-10 grid gap-5 sm:grid-cols-3">
         <Card className="p-5">

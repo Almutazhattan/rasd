@@ -7,6 +7,9 @@ import {
   Row,
 } from '@/components/ui';
 import { DiscoverButton } from '@/components/client/forms';
+import { DemoWorkspaceCard } from '@/components/client/demo-workspace';
+import { getProfile } from '@/server/company';
+import { can } from '@/lib/rbac';
 import type { AnalysisStatus, RunStatus, Verdict } from '@/lib/db/types';
 
 export const metadata = { title: 'اللوحة — رَصْد' };
@@ -15,6 +18,7 @@ export const dynamic = 'force-dynamic';
 export default async function Dashboard() {
   const ctx = await requireAuth();
   const d = await dashboard(ctx, ctx.userId);
+  const canLoadDemo = can(ctx.role, 'profile:confirm') && !(await getProfile(ctx));
 
   return (
     <div>
@@ -39,6 +43,12 @@ export default async function Dashboard() {
           <Alert tone="warn" title={`${d.counts.demoTenders} سجلاً توضيحياً في مساحة العمل`}>
             سجلات مزوّد البيانات التوضيحية موسومة في كل موضع تظهر فيه، ولا تمثّل منافسات حكومية قائمة.
           </Alert>
+        </div>
+      )}
+
+      {canLoadDemo && (
+        <div className="mb-10">
+          <DemoWorkspaceCard aiConnected={d.integrations.ai === 'CONNECTED'} />
         </div>
       )}
 

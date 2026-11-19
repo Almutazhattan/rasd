@@ -16,7 +16,7 @@ export type AuditAction =
   | 'agent.run' | 'agent.step' | 'agent.cancel'
   | 'approval.request' | 'approval.decide'
   | 'draft.create' | 'draft.update' | 'draft.approve' | 'draft.export'
-  | 'report.create' | 'settings.update';
+  | 'report.create' | 'settings.update' | 'demo.load';
 
 export async function audit(
   ctx: Ctx,
