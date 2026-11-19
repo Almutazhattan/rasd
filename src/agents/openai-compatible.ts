@@ -15,7 +15,11 @@ import { logger } from '@/lib/logger';
 import type { JsonSchema } from './jsonschema';
 import type { LlmContent, LlmMessage, LlmProvider, LlmRequest, LlmResult, LlmToolUse } from './provider';
 
-type OaiToolCall = { id?: string; type: 'function'; function: { name: string; arguments: string } };
+type OaiToolCall = {
+  id?: string; type: 'function'; function: { name: string; arguments: string };
+  /** Gemini 3 puts its thought_signature here; it must be sent back verbatim. */
+  extra_content?: { google?: { thought_signature?: string } } & Record<string, unknown>;
+};
 type OaiMessage =
   | { role: 'system'; content: string }
   | { role: 'user'; content: string }
@@ -30,6 +34,37 @@ export interface OpenAiCompatibleConfig {
   timeoutMs: number;
   /** Gemini accepts only an OpenAPI-style subset of JSON Schema. */
   schemaDialect: 'gemini' | 'json-schema';
+  /** OpenAI-style reasoning_effort; Gemini 3 maps it to its thinking level. */
+  reasoningEffort?: 'low' | 'medium' | 'high';
+}
+
+/**
+ * Gemini 3 thought signatures.
+ *
+ * Every tool call Gemini 3 returns carries an opaque
+ * extra_content.google.thought_signature, and the next request must echo it
+ * on that same tool call or Gemini rejects the turn with HTTP 400. Agents keep
+ * provider-neutral history (id, name, input), so the signature is held here,
+ * keyed by tool-call id, and re-attached when the history is serialised.
+ * Where none is known, Google documents "skip_thought_signature_validator" as
+ * the value to send.
+ */
+const SIGNATURES = new Map<string, OaiToolCall['extra_content']>();
+const SIGNATURE_CAP = 5000;
+export const SKIP_SIGNATURE = 'skip_thought_signature_validator';
+
+function rememberSignature(id: string, extra: OaiToolCall['extra_content']) {
+  if (!extra) return;
+  if (SIGNATURES.size >= SIGNATURE_CAP) {
+    const oldest = SIGNATURES.keys().next().value;
+    if (oldest !== undefined) SIGNATURES.delete(oldest);
+  }
+  SIGNATURES.set(id, extra);
+}
+
+/** Tests only. */
+export function __signatureFor(id: string) {
+  return SIGNATURES.get(id);
 }
 
 /**
@@ -69,7 +104,9 @@ export function toGeminiSchema(s: JsonSchema): Record<string, unknown> {
 }
 
 /** Provider-neutral messages → OpenAI chat messages. */
-export function toOaiMessages(system: string, messages: LlmMessage[]): OaiMessage[] {
+export function toOaiMessages(
+  system: string, messages: LlmMessage[], dialect: 'gemini' | 'json-schema' = 'json-schema',
+): OaiMessage[] {
   const out: OaiMessage[] = [{ role: 'system', content: system }];
   for (const m of messages) {
     if (typeof m.content === 'string') {
@@ -81,9 +118,12 @@ export function toOaiMessages(system: string, messages: LlmMessage[]): OaiMessag
       const text = blocks.filter((b) => b.type === 'text').map((b) => (b as { text: string }).text).join('\n');
       const calls = blocks
         .filter((b): b is Extract<LlmContent, { type: 'tool_use' }> => b.type === 'tool_use')
-        .map((b) => ({
+        .map((b): OaiToolCall => ({
           id: b.id, type: 'function' as const,
           function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
+          ...(dialect === 'gemini'
+            ? { extra_content: SIGNATURES.get(b.id) ?? { google: { thought_signature: SKIP_SIGNATURE } } }
+            : {}),
         }));
       out.push({ role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
       continue;
@@ -138,7 +178,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
 
     const body = {
       model: this.cfg.model,
-      messages: toOaiMessages(req.system, req.messages),
+      messages: toOaiMessages(req.system, req.messages, this.cfg.schemaDialect),
+      ...(this.cfg.reasoningEffort ? { reasoning_effort: this.cfg.reasoningEffort } : {}),
       max_tokens: req.maxTokens ?? e.AI_MAX_OUTPUT_TOKENS,
       temperature: req.temperature ?? 0,
       ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
@@ -172,7 +213,9 @@ export class OpenAiCompatibleProvider implements LlmProvider {
           // it and asks the model to repair, as for any invalid submission.
           input = { __unparsable_arguments: c.function.arguments };
         }
-        return { id: c.id || `call_${Date.now().toString(36)}_${i}`, name: c.function.name, input };
+        const id = c.id || `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${i}`;
+        rememberSignature(id, c.extra_content);
+        return { id, name: c.function.name, input };
       });
 
       const finish = choice?.finish_reason ?? null;

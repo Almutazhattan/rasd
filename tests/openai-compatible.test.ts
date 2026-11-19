@@ -6,7 +6,7 @@
  * on a provider other than Anthropic.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OpenAiCompatibleProvider, toGeminiSchema, toOaiMessages } from '@/agents/openai-compatible';
+import { OpenAiCompatibleProvider, SKIP_SIGNATURE, __signatureFor, toGeminiSchema, toOaiMessages } from '@/agents/openai-compatible';
 import { zodToJsonSchema } from '@/agents/jsonschema';
 import { AGENT_LIST } from '@/agents/registry';
 import { toolSpecs } from '@/agents/tools';
@@ -198,5 +198,49 @@ describe('complete()', () => {
     stubFetch({ error: { message: 'quota exceeded' } }, 429);
     await expect(provider().complete({ system: 'S', messages: [{ role: 'user', content: 'go' }] }))
       .rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+  });
+});
+
+describe('Gemini 3 thought signatures', () => {
+  it('keeps the signature from a tool call and sends it back on the next turn', async () => {
+    const calls = stubFetch({ choices: [{ finish_reason: 'tool_calls', message: { tool_calls: [
+      { id: 'sig_call_1', type: 'function', function: { name: 'read_doc', arguments: '{}' },
+        extra_content: { google: { thought_signature: 'SIG-abc123' } } },
+    ] } }] });
+    const p = provider('gemini');
+    const first = await p.complete({ system: 'S', messages: [{ role: 'user', content: 'go' }] });
+    expect(__signatureFor('sig_call_1')).toEqual({ google: { thought_signature: 'SIG-abc123' } });
+
+    await p.complete({ system: 'S', messages: [
+      { role: 'user', content: 'go' },
+      { role: 'assistant', content: first.toolUses.map((u) => ({ type: 'tool_use' as const, ...u })) },
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'sig_call_1', content: 'text' }] },
+    ] });
+    const sent = JSON.parse(String(calls[1].init.body));
+    expect(sent.messages[2].tool_calls[0].extra_content).toEqual({ google: { thought_signature: 'SIG-abc123' } });
+  });
+
+  it('sends the documented skip value when no signature is known', () => {
+    const out = toOaiMessages('S', [{ role: 'assistant', content: [
+      { type: 'tool_use', id: 'never_seen', name: 't', input: {} },
+    ] }], 'gemini') as { tool_calls?: { extra_content?: unknown }[] }[];
+    expect(out[1].tool_calls?.[0].extra_content).toEqual({ google: { thought_signature: SKIP_SIGNATURE } });
+  });
+
+  it('Groq gets no Gemini-specific fields', () => {
+    const out = toOaiMessages('S', [{ role: 'assistant', content: [
+      { type: 'tool_use', id: 'x1', name: 't', input: {} },
+    ] }], 'json-schema') as { tool_calls?: Record<string, unknown>[] }[];
+    expect(out[1].tool_calls?.[0]).not.toHaveProperty('extra_content');
+  });
+
+  it('sends reasoning_effort when configured', async () => {
+    const calls = stubFetch({ choices: [{ finish_reason: 'stop', message: { content: 'ok' } }] });
+    const p = new OpenAiCompatibleProvider({
+      name: 'gemini', baseUrl: 'https://example.test/v1', apiKey: 'k-0123456789ab', model: 'm',
+      timeoutMs: 5000, schemaDialect: 'gemini', reasoningEffort: 'low',
+    });
+    await p.complete({ system: 'S', messages: [{ role: 'user', content: 'go' }] });
+    expect(JSON.parse(String(calls[0].init.body)).reasoning_effort).toBe('low');
   });
 });

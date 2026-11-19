@@ -14,7 +14,9 @@ const schema = z.object({
   ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default('claude-sonnet-4-5'),
   GEMINI_API_KEY: z.string().optional(),
-  GEMINI_MODEL: z.string().default('gemini-2.5-flash'),
+  GEMINI_MODEL: z.string().default('gemini-3.8-flash'),
+  /** Gemini 3 thinking level, via OpenAI-style reasoning_effort. Low keeps runs inside serverless time limits. */
+  GEMINI_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
   GROQ_API_KEY: z.string().optional(),
   GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8000),

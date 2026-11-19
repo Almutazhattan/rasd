@@ -156,6 +156,7 @@ export function getProvider(): LlmProvider {
       model: e.GEMINI_MODEL,
       timeoutMs: e.AI_REQUEST_TIMEOUT_MS,
       schemaDialect: 'gemini',
+      reasoningEffort: e.GEMINI_REASONING_EFFORT,
     });
   } else if (e.AI_PROVIDER === 'groq' && e.GROQ_API_KEY) {
     cached = new OpenAiCompatibleProvider({
