@@ -8,7 +8,7 @@ export const GET = handler(async (_req: Request, { params }: { params: { id: str
   const ctx = await requireAuth();
   const [analysis, agents] = await Promise.all([getAnalysis(ctx, params.id), runTree(ctx, params.id)]);
   // On serverless hosts, a poll of a still-queued analysis nudges the queue.
-  if ((analysis.analysis as { status?: string } | undefined)?.status === 'QUEUED') await kickJobs();
+  if ((analysis.analysis as { status?: string } | undefined)?.status === 'QUEUED' || (analysis.analysis as { status?: string } | undefined)?.status === 'RUNNING') await kickJobs();
   return ok({ ...analysis, agents } as never);
 });
 

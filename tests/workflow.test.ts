@@ -17,7 +17,7 @@ import { register } from '@/server/accounts';
 import { addCapability, addCertification, addPastProject, confirmProfile, saveProfile } from '@/server/company';
 import { uploadCompanyDocument, uploadTenderDocument } from '@/server/documents';
 import { discover } from '@/server/providers';
-import { executeAnalysis, getAnalysis, startAnalysis } from '@/server/analysis';
+import { AnalysisYield, executeAnalysis, getAnalysis, startAnalysis } from '@/server/analysis';
 import { createDraft, exportDraft, getDraft, requestExportApproval } from '@/server/drafts';
 import { decideApproval, listApprovals } from '@/server/approvals';
 import { buildReport } from '@/server/reports';
@@ -491,4 +491,49 @@ describe('failure paths', () => {
       .where('status' as never, '=', 'PROVIDER_UNCONFIGURED' as never).execute()) as Row[];
     await expect(createDraft(ctx, String(analyses[0]!.id))).rejects.toMatchObject({ code: 'CONFLICT' });
   });
+});
+
+describe('serverless: an analysis split across invocations', () => {
+  /** A provider that takes a moment, so a tight invocation deadline runs out. */
+  class SlowProvider extends WorkflowProvider {
+    async complete(req: LlmRequest): Promise<LlmResult> {
+      await new Promise((r) => setTimeout(r, 120));
+      return super.complete(req);
+    }
+  }
+
+  it('yields when an invocation is nearly over, then resumes without repeating any agent', async () => {
+    const provider = new SlowProvider();
+    __setProvider(provider);
+    const { analysisId } = await startAnalysis(ctx, tenderId);
+    const sys = systemContext(ctx.orgId);
+
+    // Just enough time for one stage to start, not the next.
+    const tight = Date.now() + 150_000 + 60;
+    await expect(executeAnalysis(sys, analysisId, { deadlineAt: tight }))
+      .rejects.toBeInstanceOf(AnalysisYield);
+    expect(provider.calls).toEqual(['orchestrator']);
+    expect(((await getAnalysis(ctx, analysisId)).analysis as Row).status).toBe('RUNNING');
+
+    // Next invocation, plenty of time: carries on from where it stopped.
+    const status = await executeAnalysis(sys, analysisId, { deadlineAt: Date.now() + 10 * 60_000 });
+    expect(status).toBe('NEEDS_HUMAN_REVIEW');
+    expect(provider.calls.filter((c) => c === 'orchestrator')).toHaveLength(1);
+    expect(new Set(provider.calls).size).toBe(provider.calls.length); // every agent ran exactly once
+
+    const { analysis, dimensions } = await getAnalysis(ctx, analysisId);
+    expect((analysis as Row).score).not.toBeNull();
+    expect(dimensions).toHaveLength(6); // persisted once, not duplicated by the resume
+  }, 60_000);
+
+  it('a finished analysis is not re-run by a duplicate job', async () => {
+    const provider = new WorkflowProvider();
+    __setProvider(provider);
+    const { analysisId } = await startAnalysis(ctx, tenderId);
+    const sys = systemContext(ctx.orgId);
+    await executeAnalysis(sys, analysisId);
+    const before = provider.calls.length;
+    await executeAnalysis(sys, analysisId);
+    expect(provider.calls.length).toBe(before);
+  }, 60_000);
 });

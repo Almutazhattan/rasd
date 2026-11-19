@@ -33,6 +33,11 @@ export interface RunOptions {
   analysisId?: string;
   tenderId?: string;
   parentRunId?: string;
+  /**
+   * Hard wall-clock limit from the host (a serverless invocation's end). The
+   * run's budget is the earlier of this and the agent's own timeoutMs.
+   */
+  deadlineAt?: number;
 }
 
 export interface RunOutcome<T = unknown> {
@@ -97,7 +102,7 @@ export async function runAgent<T = unknown>(opts: RunOptions): Promise<RunOutcom
 
   const tc: ToolContext = { ctx, analysisId: opts.analysisId, tenderId: opts.tenderId };
   const specs = [...toolSpecs(agent.tools), submitSpec(agent)];
-  const deadline = Date.now() + agent.timeoutMs;
+  const deadline = Math.min(Date.now() + agent.timeoutMs, opts.deadlineAt ?? Infinity);
 
   let ordinal = 0;
   let usage = { input: 0, output: 0 };

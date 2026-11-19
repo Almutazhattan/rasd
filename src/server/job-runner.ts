@@ -12,8 +12,8 @@
  * Both paths claim jobs with FOR UPDATE SKIP LOCKED, so they cannot collide
  * with each other or with a classic worker pointed at the same database.
  */
-import { claimJob, completeJob, failJob, jobContext, type ClaimedJob } from './jobs';
-import { executeAnalysis } from './analysis';
+import { claimJob, completeJob, enqueue, failJob, jobContext, requeueStale, type ClaimedJob } from './jobs';
+import { AnalysisYield, executeAnalysis } from './analysis';
 import { discover } from './providers';
 import { createDraft } from './drafts';
 import { notify } from './notifications';
@@ -21,7 +21,8 @@ import { scoped } from '@/lib/tenancy';
 import { expiringDocuments } from './documents';
 import { logger } from '@/lib/logger';
 
-export async function handleJob(job: ClaimedJob) {
+/** Returns 'yielded' when the work must continue in a fresh invocation. */
+export async function handleJob(job: ClaimedJob, deadlineAt?: number): Promise<void | 'yielded'> {
   const ctx = jobContext(job.org_id);
   const payload = job.payload ?? {};
 
@@ -29,8 +30,17 @@ export async function handleJob(job: ClaimedJob) {
     case 'RUN_ANALYSIS': {
       const analysisId = String(payload.analysisId ?? '');
       if (!analysisId) throw new Error('RUN_ANALYSIS without analysisId');
-      const status = await executeAnalysis(ctx, analysisId);
-      logger.info('analysis finished', { analysisId, status });
+      try {
+        const status = await executeAnalysis(ctx, analysisId, { deadlineAt });
+        logger.info('analysis finished', { analysisId, status });
+      } catch (err) {
+        if (!(err instanceof AnalysisYield)) throw err;
+        // Out of time in this invocation: continue in a fresh one. Completed
+        // stages are reused, so nothing is repeated.
+        await enqueue(ctx, 'RUN_ANALYSIS', payload);
+        logger.info('analysis continues in next invocation', { analysisId, nextStage: err.stage });
+        return 'yielded';
+      }
       return;
     }
     case 'DISCOVER_TENDERS': {
@@ -90,18 +100,22 @@ export async function handleJob(job: ClaimedJob) {
   }
 }
 
-/** Claim, run and settle a single job. Returns false when the queue is empty. */
-export async function runOneJob(workerId: string): Promise<boolean> {
+/**
+ * Claim, run and settle a single job. Returns false when the queue is empty,
+ * 'yielded' when the job handed its remaining work to a fresh invocation.
+ */
+export async function runOneJob(workerId: string, deadlineAt?: number): Promise<boolean | 'yielded'> {
   const job = await claimJob(workerId);
   if (!job) return false;
   logger.info('job claimed', { jobId: job.id, type: job.type, attempt: job.attempts });
+  let result: boolean | 'yielded' = true;
   try {
-    await handleJob(job);
+    if ((await handleJob(job, deadlineAt)) === 'yielded') result = 'yielded';
     await completeJob(job.id);
   } catch (err) {
     await failJob(job, err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err));
   }
-  return true;
+  return result;
 }
 
 /**
@@ -110,17 +124,27 @@ export async function runOneJob(workerId: string): Promise<boolean> {
  * (the host's maxDuration is the hard ceiling, and requeueStale recovers a job
  * whose invocation was cut off).
  */
-export async function drainJobs(opts: { budgetMs: number; workerId?: string }): Promise<number> {
+export async function drainJobs(opts: {
+  budgetMs: number; workerId?: string;
+  /** Hard end of this invocation; analysis stages will not start past it. */
+  hardDeadlineAt?: number;
+}): Promise<number> {
   const workerId = opts.workerId ?? `fn-${Math.random().toString(36).slice(2, 10)}`;
   const deadline = Date.now() + opts.budgetMs;
   let ran = 0;
   while (Date.now() < deadline) {
-    const had = await runOneJob(workerId);
+    const had = await runOneJob(workerId, opts.hardDeadlineAt);
     if (!had) break;
     ran++;
+    // A yield means this invocation is out of time: the re-queued job belongs
+    // to the next one. Claiming it here would only yield again.
+    if (had === 'yielded') break;
   }
   return ran;
 }
+
+/** Function maxDuration on the serverless host (routes export maxDuration = 300). */
+export const INVOCATION_MS = 300_000;
 
 /** True when running on a serverless host with no separate worker process. */
 export function isServerless(): boolean {
@@ -135,7 +159,13 @@ export function isServerless(): boolean {
  */
 export async function kickJobs(budgetMs = 240_000): Promise<void> {
   if (!isServerless()) return;
-  const work = drainJobs({ budgetMs }).catch((err) => {
+  // The invocation ends at maxDuration (300 s) from its start; keep a margin.
+  const hardDeadlineAt = Date.now() + INVOCATION_MS - 15_000;
+  const work = (async () => {
+    // A job RUNNING longer than any invocation can live was cut off: release it.
+    await requeueStale(INVOCATION_MS + 60_000);
+    return drainJobs({ budgetMs, hardDeadlineAt });
+  })().catch((err) => {
     logger.error('inline job drain failed', { err: err instanceof Error ? err.message : String(err) });
   });
   try {

@@ -157,6 +157,8 @@ export function getProvider(): LlmProvider {
       timeoutMs: e.AI_REQUEST_TIMEOUT_MS,
       schemaDialect: 'gemini',
       reasoningEffort: e.GEMINI_REASONING_EFFORT,
+      fallbackModels: e.GEMINI_FALLBACK_MODELS.split(',').map((m) => m.trim()).filter(Boolean),
+      requestTimeoutMs: e.AI_CALL_TIMEOUT_MS,
     });
   } else if (e.AI_PROVIDER === 'groq' && e.GROQ_API_KEY) {
     cached = new OpenAiCompatibleProvider({
@@ -166,6 +168,7 @@ export function getProvider(): LlmProvider {
       model: e.GROQ_MODEL,
       timeoutMs: e.AI_REQUEST_TIMEOUT_MS,
       schemaDialect: 'json-schema',
+      requestTimeoutMs: e.AI_CALL_TIMEOUT_MS,
     });
   } else if (e.ANTHROPIC_API_KEY) {
     cached = new AnthropicProvider(e.ANTHROPIC_API_KEY, e.ANTHROPIC_MODEL, e.AI_REQUEST_TIMEOUT_MS);

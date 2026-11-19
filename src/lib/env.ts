@@ -17,6 +17,10 @@ const schema = z.object({
   GEMINI_MODEL: z.string().default('gemini-3.8-flash'),
   /** Gemini 3 thinking level, via OpenAI-style reasoning_effort. Low keeps runs inside serverless time limits. */
   GEMINI_REASONING_EFFORT: z.enum(['low', 'medium', 'high']).default('low'),
+  /** Comma-separated models tried when the primary is overloaded, rate-limited or slow. */
+  GEMINI_FALLBACK_MODELS: z.string().default('gemini-3.5-flash,gemini-3.5-flash-lite'),
+  /** Ceiling for one HTTP call to an OpenAI-compatible provider. */
+  AI_CALL_TIMEOUT_MS: z.coerce.number().int().positive().default(75_000),
   GROQ_API_KEY: z.string().optional(),
   GROQ_MODEL: z.string().default('llama-3.3-70b-versatile'),
   AI_MAX_OUTPUT_TOKENS: z.coerce.number().int().positive().default(8000),

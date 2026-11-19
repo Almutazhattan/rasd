@@ -36,6 +36,10 @@ export interface OpenAiCompatibleConfig {
   schemaDialect: 'gemini' | 'json-schema';
   /** OpenAI-style reasoning_effort; Gemini 3 maps it to its thinking level. */
   reasoningEffort?: 'low' | 'medium' | 'high';
+  /** Tried in order when the primary model is overloaded, rate-limited or slow. */
+  fallbackModels?: string[];
+  /** Ceiling for a single HTTP call, so a hung call leaves time to retry. */
+  requestTimeoutMs?: number;
 }
 
 /**
@@ -49,23 +53,37 @@ export interface OpenAiCompatibleConfig {
  * Where none is known, Google documents "skip_thought_signature_validator" as
  * the value to send.
  */
-const SIGNATURES = new Map<string, OaiToolCall['extra_content']>();
+// Signatures are only valid for the model that produced them; after a
+// fallback switch, the skip value is sent instead of another model's signature.
+const SIGNATURES = new Map<string, { model: string; extra: OaiToolCall['extra_content'] }>();
 const SIGNATURE_CAP = 5000;
 export const SKIP_SIGNATURE = 'skip_thought_signature_validator';
 
-function rememberSignature(id: string, extra: OaiToolCall['extra_content']) {
+function rememberSignature(id: string, model: string, extra: OaiToolCall['extra_content']) {
   if (!extra) return;
   if (SIGNATURES.size >= SIGNATURE_CAP) {
     const oldest = SIGNATURES.keys().next().value;
     if (oldest !== undefined) SIGNATURES.delete(oldest);
   }
-  SIGNATURES.set(id, extra);
+  SIGNATURES.set(id, { model, extra });
 }
 
 /** Tests only. */
 export function __signatureFor(id: string) {
-  return SIGNATURES.get(id);
+  return SIGNATURES.get(id)?.extra;
 }
+
+// ── model health: a model that just failed is tried last for a while ──
+const DEMOTE_MS = 120_000;
+const demotedUntil = new Map<string, number>();
+const RETRYABLE_HTTP = new Set([408, 409, 429, 500, 502, 503, 504]);
+
+class CallError extends Error {
+  constructor(message: string, readonly retryable: boolean, readonly timedOut = false) { super(message); }
+}
+
+/** Tests only. */
+export function __resetModelHealth() { demotedUntil.clear(); }
 
 /**
  * Gemini rejects `additionalProperties` and union `type` arrays. Rewrite
@@ -106,6 +124,7 @@ export function toGeminiSchema(s: JsonSchema): Record<string, unknown> {
 /** Provider-neutral messages → OpenAI chat messages. */
 export function toOaiMessages(
   system: string, messages: LlmMessage[], dialect: 'gemini' | 'json-schema' = 'json-schema',
+  model?: string,
 ): OaiMessage[] {
   const out: OaiMessage[] = [{ role: 'system', content: system }];
   for (const m of messages) {
@@ -122,7 +141,14 @@ export function toOaiMessages(
           id: b.id, type: 'function' as const,
           function: { name: b.name, arguments: JSON.stringify(b.input ?? {}) },
           ...(dialect === 'gemini'
-            ? { extra_content: SIGNATURES.get(b.id) ?? { google: { thought_signature: SKIP_SIGNATURE } } }
+            ? {
+              extra_content: (() => {
+                const sig = SIGNATURES.get(b.id);
+                return sig && (model === undefined || sig.model === model)
+                  ? sig.extra
+                  : { google: { thought_signature: SKIP_SIGNATURE } };
+              })(),
+            }
             : {}),
         }));
       out.push({ role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
@@ -161,12 +187,64 @@ export class OpenAiCompatibleProvider implements LlmProvider {
     this.model = cfg.model;
   }
 
+  /**
+   * One request, made reliable: each call is capped (requestTimeoutMs) so a
+   * hung call cannot eat the whole budget; an overloaded, rate-limited or slow
+   * model is retried and then swapped for the next fallback model, and the
+   * one that failed is tried last for the next two minutes. A request the
+   * provider rejects outright (bad request, auth) is not retried.
+   */
   async complete(req: LlmRequest): Promise<LlmResult> {
-    const e = env();
-    const controller = new AbortController();
     const budget = req.deadlineMs ?? this.cfg.timeoutMs;
-    const timer = setTimeout(() => controller.abort(), budget);
+    const giveUpAt = Date.now() + budget;
+    const now = Date.now();
+    const chain = [this.cfg.model, ...(this.cfg.fallbackModels ?? [])]
+      .filter((m, i, a) => m && a.indexOf(m) === i);
+    const healthy = chain.filter((m) => (demotedUntil.get(m) ?? 0) <= now);
+    const order = [...healthy, ...chain.filter((m) => !healthy.includes(m))];
+    // Each model gets up to two tries, round-robin, while time remains.
+    const attempts = [...order, ...order];
 
+    const cap = this.cfg.requestTimeoutMs ?? 90_000;
+    // Smallest call worth making: a couple of seconds, or the cap if it is shorter.
+    const minCall = Math.min(2_500, cap);
+    let lastError: CallError | null = null;
+    for (let i = 0; i < attempts.length; i++) {
+      const model = attempts[i];
+      if (giveUpAt - Date.now() < minCall + 500) break;
+      if (i > 0) {
+        const pause = Math.min(1_500 * i, 5_000, giveUpAt - Date.now() - minCall - 500);
+        if (pause > 0) await new Promise((r) => setTimeout(r, pause));
+      }
+      const timeout = Math.min(giveUpAt - Date.now() - 500, cap);
+      if (timeout < minCall) break;
+      try {
+        const result = await this.callOnce(model, req, timeout);
+        if (model !== this.cfg.model) {
+          logger.info('ai fallback model answered', { provider: this.name, model, primary: this.cfg.model });
+        }
+        return result;
+      } catch (err) {
+        const e = err instanceof CallError ? err : new CallError(String(err), true);
+        lastError = e;
+        logger.warn('ai call failed', {
+          provider: this.name, model, attempt: i + 1, retryable: e.retryable, message: e.message.slice(0, 400),
+        });
+        if (!e.retryable) break;
+        demotedUntil.set(model, Date.now() + DEMOTE_MS);
+      }
+    }
+
+    const message = lastError?.message ?? 'no attempt could be made within the time budget';
+    logger.error('ai provider error', { provider: this.name, message: message.slice(0, 800) });
+    if (lastError?.timedOut || !lastError) {
+      throw new AppError('TIMEOUT', `The AI provider did not respond within ${budget} ms.`);
+    }
+    throw new AppError('PROVIDER_ERROR', 'The AI provider returned an error.', { message });
+  }
+
+  private async callOnce(model: string, req: LlmRequest, timeoutMs: number): Promise<LlmResult> {
+    const e = env();
     const tools = req.tools?.map((t) => ({
       type: 'function' as const,
       function: {
@@ -175,16 +253,19 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         parameters: this.cfg.schemaDialect === 'gemini' ? toGeminiSchema(t.input_schema) : t.input_schema,
       },
     }));
-
     const body = {
-      model: this.cfg.model,
-      messages: toOaiMessages(req.system, req.messages, this.cfg.schemaDialect),
+      model,
+      messages: toOaiMessages(req.system, req.messages, this.cfg.schemaDialect, model),
       ...(this.cfg.reasoningEffort ? { reasoning_effort: this.cfg.reasoningEffort } : {}),
       max_tokens: req.maxTokens ?? e.AI_MAX_OUTPUT_TOKENS,
       temperature: req.temperature ?? 0,
       ...(tools?.length ? { tools, tool_choice: 'auto' } : {}),
     };
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let raw: string;
+    let status: number;
     try {
       const res = await fetch(`${this.cfg.baseUrl}/chat/completions`, {
         method: 'POST',
@@ -192,49 +273,53 @@ export class OpenAiCompatibleProvider implements LlmProvider {
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      const raw = await res.text();
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}: ${raw.slice(0, 500)}`);
-      }
-      const data = JSON.parse(raw) as {
-        model?: string;
-        choices?: { message?: { content?: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
-      };
-      const choice = data.choices?.[0];
-      const msg = choice?.message ?? {};
-
-      const toolUses: LlmToolUse[] = (msg.tool_calls ?? []).map((c, i) => {
-        let input: unknown;
-        try {
-          input = c.function.arguments ? JSON.parse(c.function.arguments) : {};
-        } catch {
-          // Pass the unparsable text through; the runner's validation rejects
-          // it and asks the model to repair, as for any invalid submission.
-          input = { __unparsable_arguments: c.function.arguments };
-        }
-        const id = c.id || `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${i}`;
-        rememberSignature(id, c.extra_content);
-        return { id, name: c.function.name, input };
-      });
-
-      const finish = choice?.finish_reason ?? null;
-      return {
-        text: (msg.content ?? '').trim(),
-        toolUses,
-        stopReason: finish ? (STOP_REASONS[finish] ?? finish) : null,
-        model: data.model ?? this.cfg.model,
-        usage: { input: data.usage?.prompt_tokens ?? 0, output: data.usage?.completion_tokens ?? 0 },
-      };
+      status = res.status;
+      raw = await res.text();
     } catch (err) {
-      if (controller.signal.aborted) {
-        throw new AppError('TIMEOUT', `The AI provider did not respond within ${budget} ms.`);
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error('ai provider error', { provider: this.name, message });
-      throw new AppError('PROVIDER_ERROR', 'The AI provider returned an error.', { message });
+      if (controller.signal.aborted) throw new CallError(`no response within ${timeoutMs} ms`, true, true);
+      throw new CallError(`network error: ${err instanceof Error ? err.message : String(err)}`, true);
     } finally {
       clearTimeout(timer);
     }
+    if (status < 200 || status >= 300) {
+      throw new CallError(`HTTP ${status}: ${raw.slice(0, 500)}`, RETRYABLE_HTTP.has(status));
+    }
+
+    let data: {
+      model?: string;
+      choices?: { message?: { content?: string | null; tool_calls?: OaiToolCall[] }; finish_reason?: string }[];
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      throw new CallError(`unreadable response: ${raw.slice(0, 200)}`, true);
+    }
+    const choice = data.choices?.[0];
+    if (!choice) throw new CallError(`response had no choices: ${raw.slice(0, 200)}`, true);
+    const msg = choice.message ?? {};
+
+    const toolUses: LlmToolUse[] = (msg.tool_calls ?? []).map((c, i) => {
+      let input: unknown;
+      try {
+        input = c.function.arguments ? JSON.parse(c.function.arguments) : {};
+      } catch {
+        // Pass the unparsable text through; the runner's validation rejects
+        // it and asks the model to repair, as for any invalid submission.
+        input = { __unparsable_arguments: c.function.arguments };
+      }
+      const id = c.id || `call_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}_${i}`;
+      rememberSignature(id, model, c.extra_content);
+      return { id, name: c.function.name, input };
+    });
+
+    const finish = choice.finish_reason ?? null;
+    return {
+      text: (msg.content ?? '').trim(),
+      toolUses,
+      stopReason: finish ? (STOP_REASONS[finish] ?? finish) : null,
+      model: data.model ?? model,
+      usage: { input: data.usage?.prompt_tokens ?? 0, output: data.usage?.completion_tokens ?? 0 },
+    };
   }
 }

@@ -6,7 +6,7 @@
  * on a provider other than Anthropic.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OpenAiCompatibleProvider, SKIP_SIGNATURE, __signatureFor, toGeminiSchema, toOaiMessages } from '@/agents/openai-compatible';
+import { OpenAiCompatibleProvider, SKIP_SIGNATURE, __resetModelHealth, __signatureFor, toGeminiSchema, toOaiMessages } from '@/agents/openai-compatible';
 import { zodToJsonSchema } from '@/agents/jsonschema';
 import { AGENT_LIST } from '@/agents/registry';
 import { toolSpecs } from '@/agents/tools';
@@ -18,6 +18,7 @@ process.env.SESSION_SECRET ??= 'test-session-secret-at-least-32-characters-long'
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  __resetModelHealth();
   for (const k of ['AI_PROVIDER', 'GEMINI_API_KEY', 'GROQ_API_KEY', 'ANTHROPIC_API_KEY']) delete process.env[k];
   __resetEnv();
   __setProvider(null);
@@ -242,5 +243,79 @@ describe('Gemini 3 thought signatures', () => {
     });
     await p.complete({ system: 'S', messages: [{ role: 'user', content: 'go' }] });
     expect(JSON.parse(String(calls[0].init.body)).reasoning_effort).toBe('low');
+  });
+});
+
+describe('resilience: overload, slowness, fallback', () => {
+  const OK = { model: 'served', choices: [{ finish_reason: 'stop', message: { content: 'ok' } }] };
+  const busy = { error: { code: 503, message: 'This model is currently experiencing high demand.' } };
+
+  /** Replies in sequence; 'hang' never answers until aborted. */
+  function stubSequence(replies: ({ status: number; body: unknown } | 'hang')[]) {
+    const seen: { model: string }[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      seen.push({ model: JSON.parse(String(init.body)).model });
+      const r = replies[Math.min(seen.length - 1, replies.length - 1)];
+      if (r === 'hang') {
+        return new Promise<Response>((_, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }
+      return new Response(JSON.stringify(r.body), { status: r.status });
+    }));
+    return seen;
+  }
+
+  const make = (extra: Partial<ConstructorParameters<typeof OpenAiCompatibleProvider>[0]> = {}) =>
+    new OpenAiCompatibleProvider({
+      name: 'gemini', baseUrl: 'https://example.test/v1', apiKey: 'k-0123456789ab',
+      model: 'primary', fallbackModels: ['backup'], timeoutMs: 30_000, schemaDialect: 'gemini',
+      requestTimeoutMs: 10_000, ...extra,
+    });
+  const go = (p: OpenAiCompatibleProvider, deadlineMs = 30_000) =>
+    p.complete({ system: 'S', messages: [{ role: 'user', content: 'go' }], deadlineMs });
+
+  it('a 503 from the primary falls back to the next model and succeeds', async () => {
+    const seen = stubSequence([{ status: 503, body: busy }, { status: 200, body: OK }]);
+    const res = await go(make());
+    expect(res.text).toBe('ok');
+    expect(seen.map((x) => x.model)).toEqual(['primary', 'backup']);
+  });
+
+  it('a call that hangs is cut at the per-call cap and the backup answers in time', async () => {
+    const seen = stubSequence(['hang', { status: 200, body: OK }]);
+    const t0 = Date.now();
+    const res = await go(make({ requestTimeoutMs: 300 }));
+    expect(res.text).toBe('ok');
+    expect(seen.map((x) => x.model)).toEqual(['primary', 'backup']);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  it('a model that just failed is tried last on the next request', async () => {
+    stubSequence([{ status: 503, body: busy }, { status: 200, body: OK }]);
+    const p = make();
+    await go(p);
+    const seen = stubSequence([{ status: 200, body: OK }]);
+    await go(p);
+    expect(seen[0].model).toBe('backup');
+  });
+
+  it('a request the provider rejects (400) is not retried', async () => {
+    const seen = stubSequence([{ status: 400, body: { error: { message: 'bad schema' } } }]);
+    await expect(go(make())).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+    expect(seen).toHaveLength(1);
+  });
+
+  it('when every model stays down, it reports a provider error rather than hanging', async () => {
+    const seen = stubSequence([{ status: 503, body: busy }]);
+    await expect(go(make(), 12_000)).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+  }, 20_000);
+
+  it('after a fallback switch, the other model\'s signatures are not replayed', () => {
+    const out = toOaiMessages('S', [{ role: 'assistant', content: [
+      { type: 'tool_use', id: 'sig_call_1', name: 'read_doc', input: {} }, // signed by 'test-model' earlier
+    ] }], 'gemini', 'some-other-model') as { tool_calls?: { extra_content?: unknown }[] }[];
+    expect(out[1].tool_calls?.[0].extra_content).toEqual({ google: { thought_signature: SKIP_SIGNATURE } });
   });
 });

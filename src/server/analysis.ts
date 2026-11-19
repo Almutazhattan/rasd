@@ -31,7 +31,7 @@ import {
   type DimensionInput, type DimensionKey, type Weights,
 } from '@/lib/scoring';
 import { AGENTS } from '@/agents/registry';
-import { runAgent, savePlan } from '@/agents/runner';
+import { runAgent, savePlan, type RunOutcome } from '@/agents/runner';
 import type {
   CompatibilityOut, ComplianceOut, DocumentIntelligenceOut, OrchestratorOut,
   QaOut, RecommendationOut, RiskOut,
@@ -100,25 +100,99 @@ export async function updateWeights(ctx: Ctx, weights: Weights) {
 }
 
 /**
- * Execute a queued analysis end to end. Called by the worker, not by a request
- * handler: a full run takes minutes and must survive the user closing the tab.
+ * Thrown when a serverless invocation is too close to its end to start the
+ * next stage. The job runner re-queues the analysis; the next invocation
+ * resumes after the last completed stage.
  */
-export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<AnalysisStatus> {
+export class AnalysisYield extends Error {
+  constructor(readonly analysisId: string, readonly stage: string) {
+    super(`analysis ${analysisId} yielded before ${stage}`);
+  }
+}
+
+/** Minimum time left in an invocation to start an agent stage. */
+const STAGE_MIN_MS = 150_000;
+/** Times a stage may be cut off by the invocation limit before the analysis fails. */
+const STAGE_MAX_CUTOFFS = 2;
+
+export interface ExecuteOptions {
+  /** End of the current serverless invocation (ms epoch). Absent: run to the end. */
+  deadlineAt?: number;
+}
+
+/**
+ * Execute a queued analysis. Called by the job runner, not by a request
+ * handler: a full run takes minutes and must survive the user closing the tab.
+ *
+ * Resumable. Each agent stage that already SUCCEEDED for this analysis is
+ * reused, not re-run, and the persistence steps are idempotent (delete, then
+ * insert). On a serverless host a stage starts only with STAGE_MIN_MS left in
+ * the invocation; otherwise this throws AnalysisYield and the job runner
+ * continues in the next invocation. A long-lived worker passes no deadline
+ * and runs straight through, exactly as before.
+ */
+export async function executeAnalysis(
+  ctx: Ctx, analysisId: string, opts: ExecuteOptions = {},
+): Promise<AnalysisStatus> {
   const s = scoped(ctx);
   const analysis = await s.findById('analyses', analysisId);
   if (!analysis) throw notFound('Analysis not found in this workspace.');
   const tenderId = (analysis as { tender_id: string }).tender_id;
+  const current = analysis as { status: AnalysisStatus; started_at: Date | null };
+  // Already finished (a duplicate job, or a resume after completion): nothing to do.
+  if (['COMPLETE', 'NEEDS_HUMAN_REVIEW', 'FAILED', 'PROVIDER_UNCONFIGURED'].includes(current.status)) {
+    return current.status;
+  }
 
-  await s.update('analyses').set({ status: 'RUNNING', started_at: new Date(), updated_at: new Date() })
+  await s.update('analyses')
+    .set({ status: 'RUNNING', started_at: current.started_at ?? new Date(), updated_at: new Date() })
     .where('id' as never, '=', analysisId as never).execute();
+
+  /**
+   * Run one agent stage, or reuse its earlier successful run. A stage cut off
+   * by the invocation limit (not by its own budget) yields and is retried in
+   * the next invocation, up to STAGE_MAX_CUTOFFS times.
+   */
+  async function stage<T>(
+    agentKey: string, run: (deadlineAt: number | undefined) => Promise<RunOutcome<T>>,
+  ): Promise<RunOutcome<T>> {
+    const done = (await s.from('agent_runs')
+      .select(['id', 'output'])
+      .where('analysis_id' as never, '=', analysisId as never)
+      .where('agent_key' as never, '=', agentKey as never)
+      .where('status' as never, '=', 'SUCCEEDED' as never)
+      .orderBy('created_at', 'desc')
+      .executeTakeFirst()) as { id: string; output: T } | undefined;
+    if (done) {
+      return {
+        runId: done.id, status: 'SUCCEEDED', output: done.output, error: null,
+        usage: { input: 0, output: 0 }, model: null, steps: 0,
+      };
+    }
+    const deadlineAt = opts.deadlineAt;
+    if (deadlineAt !== undefined && deadlineAt - Date.now() < STAGE_MIN_MS) {
+      throw new AnalysisYield(analysisId, agentKey);
+    }
+    const out = await run(deadlineAt);
+    const cutOff = deadlineAt !== undefined && out.status === 'TIMED_OUT' && Date.now() >= deadlineAt - 1_000;
+    if (cutOff) {
+      const cutoffs = (await s.from('agent_runs').select('id')
+        .where('analysis_id' as never, '=', analysisId as never)
+        .where('agent_key' as never, '=', agentKey as never)
+        .where('status' as never, '=', 'TIMED_OUT' as never)
+        .execute()).length;
+      if (cutoffs <= STAGE_MAX_CUTOFFS) throw new AnalysisYield(analysisId, agentKey);
+    }
+    return out;
+  }
 
   const tender = (await s.getById('tenders', tenderId, 'Tender')) as Record<string, unknown>;
   const base = { analysisId, tenderId, tender: summarizeTender(tender) };
 
   // ── 1. plan ────────────────────────────────────────────────────────────
-  const planRun = await runAgent<OrchestratorOut>({
-    ctx, agent: AGENTS.orchestrator, input: { ...base, purpose: 'analysis' }, analysisId, tenderId,
-  });
+  const planRun = await stage<OrchestratorOut>('orchestrator', (deadlineAt) => runAgent<OrchestratorOut>({
+    ctx, agent: AGENTS.orchestrator, input: { ...base, purpose: 'analysis' }, analysisId, tenderId, deadlineAt,
+  }));
 
   if (planRun.status === 'PROVIDER_UNCONFIGURED') {
     return finishUnconfigured(ctx, analysisId);
@@ -139,10 +213,10 @@ export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<Ana
 
   // ── 2. document intelligence ───────────────────────────────────────────
   if (wanted.has('document_intelligence') && hasReadableDocs) {
-    const run = await runAgent<DocumentIntelligenceOut>({
+    const run = await stage<DocumentIntelligenceOut>('document_intelligence', (deadlineAt) => runAgent<DocumentIntelligenceOut>({
       ctx, agent: AGENTS.document_intelligence, input: base,
-      analysisId, tenderId, parentRunId: planRun.runId,
-    });
+      analysisId, tenderId, parentRunId: planRun.runId, deadlineAt,
+    }));
     if (run.status === 'SUCCEEDED' && run.output) {
       await persistRequirements(ctx, tenderId, run.output);
     } else {
@@ -151,17 +225,17 @@ export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<Ana
   }
 
   // ── 3. compatibility ───────────────────────────────────────────────────
-  const compatRun = await runAgent<CompatibilityOut>({
-    ctx, agent: AGENTS.compatibility, input: base, analysisId, tenderId, parentRunId: planRun.runId,
-  });
+  const compatRun = await stage<CompatibilityOut>('compatibility', (deadlineAt) => runAgent<CompatibilityOut>({
+    ctx, agent: AGENTS.compatibility, input: base, analysisId, tenderId, parentRunId: planRun.runId, deadlineAt,
+  }));
   if (compatRun.status !== 'SUCCEEDED' || !compatRun.output) {
     return fail(ctx, analysisId, `Compatibility assessment failed: ${compatRun.error ?? 'unknown error'}`);
   }
 
   // ── 4. compliance ──────────────────────────────────────────────────────
-  const complianceRun = await runAgent<ComplianceOut>({
-    ctx, agent: AGENTS.compliance, input: base, analysisId, tenderId, parentRunId: planRun.runId,
-  });
+  const complianceRun = await stage<ComplianceOut>('compliance', (deadlineAt) => runAgent<ComplianceOut>({
+    ctx, agent: AGENTS.compliance, input: base, analysisId, tenderId, parentRunId: planRun.runId, deadlineAt,
+  }));
   if (complianceRun.status !== 'SUCCEEDED' || !complianceRun.output) {
     return fail(ctx, analysisId, `Compliance check failed: ${complianceRun.error ?? 'unknown error'}`);
   }
@@ -178,9 +252,9 @@ export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<Ana
 
   // ── 5. risk ────────────────────────────────────────────────────────────
   let riskConfidence = 0.6;
-  const riskRun = await runAgent<RiskOut>({
-    ctx, agent: AGENTS.risk, input: { ...base, blockingGaps }, analysisId, tenderId, parentRunId: planRun.runId,
-  });
+  const riskRun = await stage<RiskOut>('risk', (deadlineAt) => runAgent<RiskOut>({
+    ctx, agent: AGENTS.risk, input: { ...base, blockingGaps }, analysisId, tenderId, parentRunId: planRun.runId, deadlineAt,
+  }));
   if (riskRun.status === 'SUCCEEDED' && riskRun.output) {
     riskConfidence = riskRun.output.confidence;
     await persistRisks(ctx, analysisId, riskRun.output);
@@ -191,10 +265,10 @@ export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<Ana
 
   // ── 7. quality assurance ───────────────────────────────────────────────
   let qa: QaOut | null = null;
-  const qaRun = await runAgent<QaOut>({
+  const qaRun = await stage<QaOut>('quality_assurance', (deadlineAt) => runAgent<QaOut>({
     ctx, agent: AGENTS.quality_assurance,
-    input: { ...base, score: scored.score, blockingGaps }, analysisId, tenderId, parentRunId: planRun.runId,
-  });
+    input: { ...base, score: scored.score, blockingGaps }, analysisId, tenderId, parentRunId: planRun.runId, deadlineAt,
+  }));
   if (qaRun.status === 'SUCCEEDED' && qaRun.output) qa = qaRun.output;
 
   const confidence = Number(
@@ -213,8 +287,8 @@ export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<Ana
 
   // ── 8. recommendation prose ────────────────────────────────────────────
   let recommendation: RecommendationOut | null = null;
-  const recRun = await runAgent<RecommendationOut>({
-    ctx, agent: AGENTS.recommendation,
+  const recRun = await stage<RecommendationOut>('recommendation', (deadlineAt) => runAgent<RecommendationOut>({
+    ctx, agent: AGENTS.recommendation, deadlineAt,
     input: {
       ...base,
       computedScore: scored.score,
@@ -225,7 +299,7 @@ export async function executeAnalysis(ctx: Ctx, analysisId: string): Promise<Ana
       qa: qa ?? { note: 'quality assurance did not complete' },
     },
     analysisId, tenderId, parentRunId: planRun.runId,
-  });
+  }));
   if (recRun.status === 'SUCCEEDED' && recRun.output) recommendation = recRun.output;
 
   const verdictOverridden = recommendation ? recommendation.verdict !== engineVerdict.verdict : false;

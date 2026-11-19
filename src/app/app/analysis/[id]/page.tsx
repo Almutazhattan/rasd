@@ -37,7 +37,7 @@ export default async function AnalysisPage({ params }: { params: { id: string } 
   const blocking = (data.compliance as Row[]).filter((c) => c.blocking);
   const inFlight = a.status === 'QUEUED' || a.status === 'RUNNING';
   // Serverless hosts have no worker: a view of queued work nudges the queue.
-  if (a.status === 'QUEUED') await kickJobs();
+  if (a.status === 'QUEUED' || a.status === 'RUNNING') await kickJobs();
 
   return (
     <div>

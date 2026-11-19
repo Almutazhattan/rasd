@@ -12,7 +12,7 @@ import { NextResponse } from 'next/server';
 import { timingSafeEqual } from 'node:crypto';
 import { getDb } from '@/lib/db';
 import { requeueStale } from '@/server/jobs';
-import { drainJobs } from '@/server/job-runner';
+import { drainJobs, INVOCATION_MS } from '@/server/job-runner';
 import { pruneExpiredSessions } from '@/lib/session';
 import { logger } from '@/lib/logger';
 
@@ -37,7 +37,7 @@ export async function GET(req: Request) {
   const started = Date.now();
   // Function invocations are capped at maxDuration, so anything RUNNING longer
   // than that was cut off and is safe to hand out again.
-  const requeued = await requeueStale(10 * 60_000);
+  const requeued = await requeueStale(INVOCATION_MS + 60_000);
   await pruneExpiredSessions();
 
   const enqueueSweep = new URL(req.url).searchParams.get('sweep') !== '0';
@@ -51,7 +51,7 @@ export async function GET(req: Request) {
     swept = Number(res.numInsertedOrUpdatedRows ?? 0);
   }
 
-  const ran = await drainJobs({ budgetMs: 240_000, workerId: 'cron' });
+  const ran = await drainJobs({ budgetMs: 240_000, workerId: 'cron', hardDeadlineAt: started + INVOCATION_MS - 15_000 });
   const result = { requeued, deadlineSweepsQueued: swept, jobsRun: ran, ms: Date.now() - started };
   logger.info('cron sweep finished', result);
   return NextResponse.json({ ok: true, data: result });
